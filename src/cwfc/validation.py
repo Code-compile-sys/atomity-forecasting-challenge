@@ -38,3 +38,51 @@ def rolling_origin_splits(
         out.append(TimeSplit(train_end, val_start, val_end))
         train_end_idx += step
     return out
+
+
+def rolling_origin_fold_metadata(
+    frame: pd.DataFrame,
+    datetime_col: str = "datetime",
+    horizon: int = 24,
+    min_train_size: int = 50,
+    step: int = 6,
+) -> pd.DataFrame:
+    """Describe expanding-window folds by row bounds and timestamp boundaries.
+
+    Row end indices are exclusive, matching normal Python slicing. The input
+    must already be sorted by the datetime column.
+    """
+    if datetime_col not in frame.columns:
+        raise ValueError(f"frame is missing required column: {datetime_col}")
+    if horizon <= 0 or min_train_size <= 0 or step <= 0:
+        raise ValueError("horizon, min_train_size, and step must be positive")
+
+    splits = rolling_origin_splits(
+        frame,
+        timestamp_col=datetime_col,
+        horizon=horizon,
+        min_train_size=min_train_size,
+        step=step,
+    )
+    rows: list[dict[str, object]] = []
+    for fold_number, split in enumerate(splits):
+        train_start_idx = 0
+        train_end_idx = min_train_size + fold_number * step
+        validation_start_idx = train_end_idx
+        validation_end_idx = validation_start_idx + horizon
+        rows.append(
+            {
+                "fold": fold_number + 1,
+                "train_start_index": train_start_idx,
+                "train_end_index_exclusive": train_end_idx,
+                "validation_start_index": validation_start_idx,
+                "validation_end_index_exclusive": validation_end_idx,
+                "train_size": train_end_idx - train_start_idx,
+                "validation_size": validation_end_idx - validation_start_idx,
+                "train_start": pd.to_datetime(frame[datetime_col].iloc[train_start_idx], utc=True),
+                "train_end": split.train_end,
+                "validation_start": split.validation_start,
+                "validation_end": split.validation_end,
+            }
+        )
+    return pd.DataFrame(rows)
