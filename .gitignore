@@ -2,3 +2,12 @@
 .venv/
 .pytest_cache/
 __pycache__/
+/challenge_data/DATA_CARD.md
+/challenge_data/SHA256SUMS
+/challenge_data/vm_cpu_readings.csv.gz
+/challenge_data/vm_metadata.csv.gz
+.vscode
+AGENTS.md
+!challenge_data/README.md
+.env
+personalNotes.md
