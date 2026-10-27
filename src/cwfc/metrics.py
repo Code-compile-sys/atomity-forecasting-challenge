@@ -41,6 +41,7 @@ def normalized_mae(y_true, y_pred, baseline_pred) -> float:
     a, prediction, baseline = _valid_pairs(y_true, y_pred, baseline_pred)
     model_mae = float(np.mean(np.abs(a - prediction)))
     baseline_mae = float(np.mean(np.abs(a - baseline)))
-    if baseline_mae == 0:
-        return 0.0 if model_mae == 0 else float("inf")
+    zero_tolerance = np.finfo(float).eps * max(1.0, float(np.mean(np.abs(a)))) * 10
+    if baseline_mae <= zero_tolerance:
+        return 0.0 if model_mae <= zero_tolerance else float("inf")
     return float(model_mae / baseline_mae)

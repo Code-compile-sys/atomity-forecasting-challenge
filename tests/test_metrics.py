@@ -13,6 +13,16 @@ def test_metrics_basic():
     assert normalized_mae(y, p, [1, 1, 1]) > 0
 
 
+def test_normalized_mae_treats_rounding_noise_as_zero_baseline_error():
+    actual = [10_000.0, 10_000.0]
+    prediction = [10_000.0 + 1e-12, 10_000.0 - 1e-12]
+    assert normalized_mae(actual, prediction, actual) == 0
+
+
+def test_normalized_mae_guards_zero_baseline_error():
+    assert normalized_mae([1.0, 2.0], [1.0, 3.0], [1.0, 2.0]) == float("inf")
+
+
 def test_metrics_ignore_missing_paired_observations():
     y = [1.0, np.nan, 3.0]
     prediction = [2.0, 100.0, 5.0]
@@ -25,6 +35,7 @@ def test_metrics_ignore_missing_paired_observations():
 
 
 def test_smape_protects_near_zero_values_with_epsilon():
+    assert smape([0.0], [0.0]) == 0
     assert smape([0.0, 1e-12], [0.0, 2e-12], eps=1e-8) == pytest.approx(0.01)
     with pytest.raises(ValueError, match="eps must be positive"):
         smape([1.0], [1.0], eps=0)

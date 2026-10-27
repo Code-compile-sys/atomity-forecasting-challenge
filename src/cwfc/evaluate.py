@@ -7,14 +7,9 @@ from collections.abc import Callable, Mapping
 import numpy as np
 import pandas as pd
 
-from cwfc.baselines import (
-    last_6_mean_forecast,
-    last_12_mean_forecast,
-    persistence_forecast,
-    seasonal_naive_forecast,
-    training_mean_forecast,
-)
-from cwfc.metrics import mae, normalized_mae, rmse, smape
+from cwfc.baselines import last_12_mean_forecast
+from cwfc.metrics import mae, rmse
+from cwfc.models import damped_exponential_smoothing_forecast, ridge_forecast
 from cwfc.validation import rolling_origin_splits
 
 
@@ -31,8 +26,6 @@ def evaluate_rolling_origin(
     min_train_size: int,
     step: int | None = None,
     forecast_kwargs: Mapping[str, object] | None = None,
-    baseline_forecast_fn: ForecastFunction = persistence_forecast,
-    baseline_forecast_kwargs: Mapping[str, object] | None = None,
 ) -> pd.DataFrame:
     """Evaluate a forecasting function over expanding chronological folds.
 
@@ -95,25 +88,6 @@ def evaluate_rolling_origin(
             )
         if not np.isfinite(prediction).all():
             raise ValueError(f"forecast for fold {fold_number} contains non-finite values")
-        baseline_prediction = np.asarray(
-            baseline_forecast_fn(
-                train,
-                validation,
-                target=target,
-                **dict(baseline_forecast_kwargs or {}),
-            ),
-            dtype=float,
-        )
-        if baseline_prediction.shape != actual.shape:
-            raise ValueError(
-                f"baseline forecast for fold {fold_number} has shape "
-                f"{baseline_prediction.shape}; expected {actual.shape}"
-            )
-        if not np.isfinite(baseline_prediction).all():
-            raise ValueError(
-                f"baseline forecast for fold {fold_number} contains non-finite values"
-            )
-
         rows.append(
             {
                 "fold": fold_number,
@@ -124,10 +98,6 @@ def evaluate_rolling_origin(
                 "validation_end": split.validation_end,
                 "mae": mae(actual, prediction),
                 "rmse": rmse(actual, prediction),
-                "normalized_mae": normalized_mae(
-                    actual, prediction, baseline_prediction
-                ),
-                "smape": smape(actual, prediction),
                 "scored_observations": int(np.isfinite(actual).sum()),
             }
         )
@@ -142,13 +112,11 @@ def evaluate_rolling_origin(
         "validation_end": pd.NaT,
         "scored_observations": np.nan,
     }
-    mean_row.update(
-        results[["mae", "rmse", "normalized_mae", "smape"]].mean().to_dict()
-    )
+    mean_row.update(results[["mae", "rmse"]].mean().to_dict())
     return pd.concat([results, pd.DataFrame([mean_row])], ignore_index=True)
 
 
-def evaluate_baselines(
+def evaluate_forecasters(
     frame: pd.DataFrame,
     target: str,
     *,
@@ -156,18 +124,19 @@ def evaluate_baselines(
     horizon: int = 24,
     min_train_size: int = 50,
     step: int = 6,
-    season_length: int = 12,
 ) -> pd.DataFrame:
-    """Return every rolling-origin score with its fold and baseline name."""
-    baseline_specs: list[tuple[str, ForecastFunction, Mapping[str, object]]] = [
-        ("Persistence", persistence_forecast, {}),
-        ("Last6Mean", last_6_mean_forecast, {}),
+    """Compare the last-12 mean, Ridge, and damped ETS on shared CV folds.
+
+    Pass only the training partition as ``frame``. ``target`` may be any
+    numeric column; timestamps are ordered by ``datetime_col``.
+    """
+    forecast_specs: list[tuple[str, ForecastFunction, Mapping[str, object]]] = [
         ("Last12Mean", last_12_mean_forecast, {}),
-        ("TrainingMean", training_mean_forecast, {}),
-        ("SeasonalNaive", seasonal_naive_forecast, {"season_length": season_length}),
+        ("Ridge", ridge_forecast, {}),
+        ("DampedETS", damped_exponential_smoothing_forecast, {}),
     ]
     results: list[pd.DataFrame] = []
-    for baseline_name, forecast_fn, forecast_kwargs in baseline_specs:
+    for model_name, forecast_fn, forecast_kwargs in forecast_specs:
         fold_results = evaluate_rolling_origin(
             frame,
             target,
@@ -177,9 +146,7 @@ def evaluate_baselines(
             min_train_size=min_train_size,
             step=step,
             forecast_kwargs=forecast_kwargs,
-            baseline_forecast_fn=persistence_forecast,
         )
-        fold_results = fold_results.loc[fold_results["fold"] != "mean"].copy()
-        fold_results.insert(1, "baseline", baseline_name)
+        fold_results.insert(1, "model", model_name)
         results.append(fold_results)
     return pd.concat(results, ignore_index=True)

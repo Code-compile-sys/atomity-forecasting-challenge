@@ -168,84 +168,122 @@ These are descriptive statistics from the training window, not causal effects or
 - Segment-level CPU differences may motivate diagnostics, but using metadata CPU-summary fields would leak precomputed target-like information and is prohibited. Only segment labels and training-period readings were used here.
 - EDA and all model/hyperparameter choices must remain inside the 110-timestamp training partition. Use rolling-origin validation there; reserve the final 24 timestamps for the required final evaluation only.
 
-## Rolling-origin baseline evaluation (training partition only)
+## Focused three-candidate CV
 
-Baselines were evaluated with expanding chronological folds on the 110 training timestamps. Rows were ordered by the UTC `datetime` column. Each fold starts with 50 training observations, validates on 24 observations, then advances the forecast origin by 6 observations, for seven overlapping folds. The final 24 challenge holdout timestamps were not included in fitting, validation, or model selection. Metrics below are arithmetic means across folds.
+The current evaluator compares exactly the last-12 moving mean, Ridge, and Damped ETS for any requested target column. It receives only the training partition, orders each fold by `datetime`, and returns per-fold plus mean MAE and RMSE; normalized MAE and sMAPE remain guarded in the metric helpers but are not added to this comparison output.
 
-The notebook's `baseline_cv_results` table stores one row for each target, baseline, and fold (70 rows total), including fold number, baseline name, fold boundaries and sizes, MAE, RMSE, normalized MAE, sMAPE, and count of scored observations.
+| Target | Model | Mean MAE | Mean RMSE |
+|---|---|---:|---:|
+| `active_vm_count` | Last12Mean | 0.000 | 0.000 |
+| `active_vm_count` | Ridge | 0.000 | 0.000 |
+| `active_vm_count` | DampedETS | 0.000 | 0.000 |
+| `aggregate_cpu_utilization` | Last12Mean | 0.260 | 0.288 |
+| `aggregate_cpu_utilization` | Ridge | 0.224 | 0.255 |
+| `aggregate_cpu_utilization` | DampedETS | 0.244 | 0.275 |
 
-### Average metrics and ranking
+Each target has seven rolling-origin folds (50 initial observations, 24-step horizon, 6-step advance). All three methods tie on the constant active-count target; Ridge has the lowest mean MAE and RMSE among these candidates for aggregate CPU utilization. No final-holdout target values enter evaluation.
 
-Metrics are arithmetic averages over the seven folds. Baselines are ranked within each target by mean MAE (lower is better); equal scores share a rank.
+Fold boundaries are ordered by `datetime`; each fold's validation window is 24 points, with the origin advancing six points:
 
-| Target | Rank | Baseline | Mean MAE | Mean RMSE | Mean normalized MAE | Mean sMAPE |
-|---|---:|---|---:|---:|---:|---:|
-| `active_vm_count` | 1 (tie) | Persistence | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | 1 (tie) | Last6Mean | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | 1 (tie) | Last12Mean | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | 1 (tie) | TrainingMean | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | 1 (tie) | SeasonalNaive | 0.000 | 0.000 | 0.000 | 0.000% |
-| `aggregate_cpu_utilization` | 1 | TrainingMean | 0.209 | 0.238 | 1.154 | 2.207% |
-| `aggregate_cpu_utilization` | 2 | Persistence | 0.215 | 0.251 | 1.000 | 2.261% |
-| `aggregate_cpu_utilization` | 3 | Last6Mean | 0.243 | 0.272 | 1.211 | 2.555% |
-| `aggregate_cpu_utilization` | 4 | Last12Mean | 0.260 | 0.288 | 1.389 | 2.732% |
-| `aggregate_cpu_utilization` | 5 | SeasonalNaive | 0.272 | 0.306 | 1.423 | 2.852% |
+| Fold | Train rows `[start:end)` | Validation rows `[start:end)` |
+|---:|---|---|
+| 1 | `[0:50)` | `[50:74)` |
+| 2 | `[0:56)` | `[56:80)` |
+| 3 | `[0:62)` | `[62:86)` |
+| 4 | `[0:68)` | `[68:92)` |
+| 5 | `[0:74)` | `[74:98)` |
+| 6 | `[0:80)` | `[80:104)` |
+| 7 | `[0:86)` | `[86:110)` |
 
-**Observation:** TrainingMean ranks first for `aggregate_cpu_utilization` by mean MAE (0.209 percentage points) and has the lowest mean RMSE and sMAPE. All five baselines tie for `active_vm_count` because the target is constant.
+## Optional 80% prediction intervals
 
-**So what:** Use TrainingMean as the leading simple CPU benchmark for this validation design, while retaining persistence as the relative-MAE reference; the flat active count provides no basis to distinguish baselines or establish churn performance.
+`forecast_targets_with_intervals()` selects the winner separately for both targets using training-only CV, pools that model's actual-minus-forecast residuals across all folds and horizon steps, and offsets its final forecast by the pooled 10th/90th residual quantiles. It clips VM counts at zero and CPU utilization to `[0,100]`; only holdout timestamps are supplied, and the interval table is separate from the required point-prediction CSV.
 
-| Target | Baseline | Mean MAE | Mean RMSE | Normalized MAE | Mean sMAPE |
-|---|---|---:|---:|---:|---:|
-| `active_vm_count` | Persistence | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | Last-6 mean | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | Last-12 mean | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | Training mean | 0.000 | 0.000 | 0.000 | 0.000% |
-| `active_vm_count` | Seasonal naive (12) | 0.000 | 0.000 | 0.000 | 0.000% |
-| `aggregate_cpu_utilization` | Persistence | 0.215 | 0.251 | 1.000 | 2.261% |
-| `aggregate_cpu_utilization` | Last-6 mean | 0.243 | 0.272 | 1.211 | 2.555% |
-| `aggregate_cpu_utilization` | Last-12 mean | 0.260 | 0.288 | 1.389 | 2.732% |
-| `aggregate_cpu_utilization` | Training mean | 0.209 | 0.238 | 1.154 | 2.207% |
-| `aggregate_cpu_utilization` | Seasonal naive (12) | 0.272 | 0.306 | 1.423 | 2.852% |
+## Aggregate CPU error analysis (training-only CV)
 
-CPU errors are in percentage points; sMAPE is a percentage. Normalized MAE is model MAE divided by persistence MAE within each fold, then averaged over folds. Because this is an average of fold-level ratios, it can rank methods differently from mean MAE. For the constant active-count series, both forecast and persistence have zero MAE, represented as normalized MAE 0.
+The selected model was Ridge. The peak cutoff is the training-series 90th percentile, **9.6684% CPU**. The seven 24-step folds contribute 168 forecast cases; because folds overlap, cases are repeated across forecast origins.
 
-**Observation:** All baselines have zero error for `active_vm_count` across the seven folds because this training series is constant at 10,000 VMs.
+| Point group | Forecast cases | MAE | RMSE | Bias (actual − forecast) |
+|---|---:|---:|---:|---:|
+| Peak (`actual > 9.6684%`) | 27 | 0.4104 | 0.4611 | +0.4104 |
+| Non-peak | 141 | 0.1885 | 0.2279 | +0.1400 |
 
-**So what:** The perfect scores follow from a flat target and do not demonstrate that these methods can anticipate future VM churn.
+**So what:** Peak errors are more than twice as large, and positive bias in both groups means Ridge tends to under-forecast, especially during high CPU periods.
 
-**Observation:** The training-mean baseline has the lowest mean aggregate CPU MAE (0.209 percentage points) and RMSE (0.238 percentage points); persistence has MAE 0.215 and RMSE 0.251.
+### Fold MAE ranking
 
-**So what:** Averaging all available training history is a competitive simple benchmark for this short, relatively stable CPU series; comparisons to other models must use the same folds.
+| Rank | Fold | MAE |
+|---:|---:|---:|
+| 1 | 1 | 0.4148 |
+| 2 | 2 | 0.3296 |
+| 3 | 3 | 0.2523 |
+| 4 | 6 | 0.1655 |
+| 5 | 5 | 0.1545 |
+| 6 | 7 | 0.1446 |
+| 7 | 4 | 0.1076 |
 
-## Baseline forecast definitions
+**Fold 1 likely reason:** The actual CPU rises into a sustained high period (9.91% peak) while Ridge remains near 9.2–9.4%, indicating under-response to the rise.
 
-The baseline functions in `src/cwfc/baselines.py` return a forecast series aligned to the supplied forecast template:
+**Fold 2 likely reason:** Ridge recursively drifts downward while actual CPU remains elevated, then the actual series drops late in the window; the forecast misses both the level and transition.
 
-- **Persistence:** repeats the latest observed training value.
-- **Last-6 mean:** repeats the mean of the latest six training observations (30 minutes at the five-minute cadence).
-- **Last-12 mean:** repeats the mean of the latest twelve training observations (one hour).
-- **Training mean:** repeats the mean of all observations available in the current training fold.
-- **Seasonal naive:** repeats values from the latest observed cycle. The default season length is **12 observations (one hour)**, matching the five-minute cadence.
+**So what:** Most error is concentrated in early validation origins where the recent training history poorly represents subsequent CPU levels and changes.
 
-**Observation:** The trace is too short to establish a repeating one-hour seasonal pattern, and earlier temporal analysis did not demonstrate reliable seasonality.
+### Optional MAE by horizon step
 
-**So what:** The 12-observation seasonal-naive forecast is included as a transparent candidate benchmark, not as a claim of proven seasonality; in this training-only comparison, it performs worse than persistence and the training mean for aggregate CPU.
+Across folds, the lowest horizon-step MAE was **0.1092 at step 2** and the highest was **0.3798 at step 16**.
 
-### Configured fold metadata
+**So what:** Error varies irregularly by forecast step rather than increasing monotonically, so a simple horizon-dependent error assumption is not supported by this short trace.
 
-For rolling-origin CV, the training partition has 110 rows. The configured minimum training size is 50, validation horizon is 24 rows, and origin step is 6 rows. Fold row bounds below are zero-based with exclusive end indices; all validation windows overlap by 18 observations. Timestamps are ordered using `datetime`.
+## Aggregate CPU provisioning policy comparison (training-only CV)
 
-| Fold | Train rows `[start:end)` | Validation rows `[start:end)` | Train size | Validation size |
-|---:|---|---|---:|---:|
-| 1 | `[0:50)` | `[50:74)` | 50 | 24 |
-| 2 | `[0:56)` | `[56:80)` | 56 | 24 |
-| 3 | `[0:62)` | `[62:86)` | 62 | 24 |
-| 4 | `[0:68)` | `[68:92)` | 68 | 24 |
-| 5 | `[0:74)` | `[74:98)` | 74 | 24 |
-| 6 | `[0:80)` | `[80:104)` | 80 | 24 |
-| 7 | `[0:86)` | `[86:110)` | 86 | 24 |
+The selected model is Ridge. The upper 80% interval margin is the pooled 90th-percentile of its CV residuals (actual minus forecast), **0.4984 percentage points**. The table scores all 168 CV forecast cases; the final holdout is excluded.
 
-**Observation:** Seven folds are generated, and each validation window starts six observations after the prior fold's origin.
+| Policy | Under-provisioning rate | Average shortfall | Wasted headroom |
+|---|---:|---:|---:|
+| A: forecast | 82.14% | 0.2481 | 0.1139 |
+| B: forecast + half upper-interval margin | 32.74% | 0.1679 | 0.1795 |
+| C: forecast + full upper-interval margin | 10.12% | 0.0868 | 0.3601 |
 
-**So what:** Overlapping validation windows provide several near-term forecast origins from the small training history, while the final 24 challenge holdout observations remain excluded.
+Under-provisioning rate is the share of all points where actual exceeds provision; average shortfall averages actual minus provision on those cases. Wasted headroom averages provision minus actual only where provision meets or exceeds actual. Values are CPU percentage points except the rate.
+
+**Recommendation:** Use Policy C for capacity planning when avoiding CPU shortfalls is the priority: it has the lowest under-provisioning rate (10.12%) and average shortfall (0.0868) on CV. Its trade-off is the largest wasted headroom (0.3601 percentage points), so use Policy B if the operational cost of spare capacity outweighs the increased shortfall risk.
+
+## Final holdout check (run once)
+
+The selected models were fit on the 110 training points only and forecast the final 24 timestamps. Interval bounds use the selected models' pooled training-CV residuals. The holdout actuals were used only for the final scores below, not for model or policy selection.
+
+| Target | Selected model | Selected MAE | Selected RMSE | Baseline | Baseline MAE | Baseline RMSE |
+|---|---|---:|---:|---|---:|---:|
+| `active_vm_count` | Last12Mean | 0.0000 | 0.0000 | Last12Mean | 0.0000 | 0.0000 |
+| `aggregate_cpu_utilization` | Ridge | 0.3012 | 0.3604 | Last12Mean | 0.1230 | 0.1613 |
+
+Policy C (full upper 80% interval margin) under-provisioned **25.00%** of CPU holdout points (6 of 24). Average wasted headroom was **0.3151 percentage points**, calculated on the 18 points where provision met or exceeded actual.
+
+| Raw timestamp (seconds) | Active VM forecast | Active VM lower 80% | Active VM upper 80% | CPU forecast | CPU lower 80% | CPU upper 80% |
+|---:|---:|---:|---:|---:|---:|---:|
+| 33000 | 10000 | 10000 | 10000 | 9.176208 | 9.113860 | 9.674581 |
+| 33300 | 10000 | 10000 | 10000 | 9.139659 | 9.077310 | 9.638031 |
+| 33600 | 10000 | 10000 | 10000 | 9.093719 | 9.031370 | 9.592091 |
+| 33900 | 10000 | 10000 | 10000 | 9.100103 | 9.037754 | 9.598475 |
+| 34200 | 10000 | 10000 | 10000 | 9.074400 | 9.012051 | 9.572772 |
+| 34500 | 10000 | 10000 | 10000 | 9.068160 | 9.005811 | 9.566532 |
+| 34800 | 10000 | 10000 | 10000 | 9.059044 | 8.996695 | 9.557416 |
+| 35100 | 10000 | 10000 | 10000 | 9.025669 | 8.963320 | 9.524041 |
+| 35400 | 10000 | 10000 | 10000 | 9.013591 | 8.951243 | 9.511964 |
+| 35700 | 10000 | 10000 | 10000 | 9.008431 | 8.946082 | 9.506803 |
+| 36000 | 10000 | 10000 | 10000 | 8.989165 | 8.926816 | 9.487537 |
+| 36300 | 10000 | 10000 | 10000 | 8.978297 | 8.915948 | 9.476669 |
+| 36600 | 10000 | 10000 | 10000 | 8.968131 | 8.905782 | 9.466503 |
+| 36900 | 10000 | 10000 | 10000 | 8.948976 | 8.886627 | 9.447348 |
+| 37200 | 10000 | 10000 | 10000 | 8.944111 | 8.881762 | 9.442483 |
+| 37500 | 10000 | 10000 | 10000 | 8.936353 | 8.874004 | 9.434725 |
+| 37800 | 10000 | 10000 | 10000 | 8.921601 | 8.859252 | 9.419974 |
+| 38100 | 10000 | 10000 | 10000 | 8.915529 | 8.853180 | 9.413901 |
+| 38400 | 10000 | 10000 | 10000 | 8.908025 | 8.845676 | 9.406397 |
+| 38700 | 10000 | 10000 | 10000 | 8.897130 | 8.834781 | 9.395502 |
+| 39000 | 10000 | 10000 | 10000 | 8.893695 | 8.831347 | 9.392068 |
+| 39300 | 10000 | 10000 | 10000 | 8.886855 | 8.824506 | 9.385227 |
+| 39600 | 10000 | 10000 | 10000 | 8.877790 | 8.815442 | 9.376163 |
+| 39900 | 10000 | 10000 | 10000 | 8.874872 | 8.812523 | 9.373244 |
+
+This final holdout check was run once. No model, policy, or parameter was changed after reviewing these holdout results.

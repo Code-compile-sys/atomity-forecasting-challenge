@@ -1,73 +1,35 @@
 # Cloud Workload Forecasting Challenge
 
-AI/ML take-home challenge built from the **Microsoft Azure Public Dataset V2** VM trace.
+This repository builds leakage-safe forecasts for the required Azure VM workload targets: `active_vm_count` and `aggregate_cpu_utilization`. Raw timestamps are retained in the output; UTC datetimes are used only for time-series modeling.
 
-## Start here
+## Requirements and installation
 
-1. Read [`ASSIGNMENT.md`](ASSIGNMENT.md).
-2. Read [`DATASET.md`](DATASET.md).
-3. Download the **`data-v1` GitHub Release** dataset and extract it as `challenge_data/`.
-4. Read [`SUBMISSION.md`](SUBMISSION.md).
-5. Implement your analysis and forecasting pipeline.
+Use Python 3.11 or newer. From the repository root, create and activate a virtual environment:
 
-The challenge dataset is distributed as a versioned GitHub Release rather than committed to the repository. The `data-v1` release contains the fixed curated dataset used for this assignment.
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
 
-## Environment setup
-
-Python **3.11 or newer** is required.
-
-Create a virtual environment:
-
-### Linux / macOS
+On macOS or Linux:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-### Windows PowerShell
-
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-### Windows Command Prompt
-
-```cmd
-py -m venv .venv
-.venv\Scripts\activate.bat
-```
-
-Install the project and development dependencies:
+Install the package and development dependencies:
 
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
-Verify the installation:
+This installs the runtime libraries used by the source and notebooks, including pandas, NumPy, scikit-learn, statsmodels, matplotlib, Jupyter, and ipykernel.
 
-```bash
-python -m pytest -q
-```
+## Dataset
 
-The repository includes a small test suite covering the starter forecasting utilities. Run it before beginning the assignment.
-
-## Dataset download
-
-The hiring dataset is distributed as the fixed `data-v1` release of this repository.
-
-**Download:** [Azure Dataset v1 Release](https://github.com/atomityhq/forecasting-challenge/releases/tag/data-v1)
-
-Download `data-v1.tar.gz` from the release and extract it into the repository as `challenge_data/`:
-
-```bash
-mkdir -p challenge_data
-tar -xzf data-v1.tar.gz -C challenge_data
-```
-
-The resulting layout is:
+Download the fixed [`data-v1` release](https://github.com/atomityhq/forecasting-challenge/releases/tag/data-v1) and extract `data-v1.tar.gz` into the repository root as `challenge_data/`. It should contain:
 
 ```text
 challenge_data/
@@ -77,53 +39,54 @@ challenge_data/
 └── SHA256SUMS
 ```
 
-Verify the dataset before starting the assignment:
+Verify the release checksums before running the pipeline. On macOS/Linux:
 
 ```bash
 cd challenge_data
 sha256sum -c SHA256SUMS
+cd ..
 ```
 
-You should see:
+On Windows PowerShell, from the repository root:
 
-```text
-vm_cpu_readings.csv.gz: OK
-vm_metadata.csv.gz: OK
-DATA_CARD.md: OK
+```powershell
+Get-Content .\challenge_data\SHA256SUMS | ForEach-Object {
+    if ($_ -notmatch '^([0-9a-fA-F]{64})\s+\*?(.+)$') { throw "Invalid checksum entry: $_" }
+    $expected = $Matches[1].ToLower()
+    $name = $Matches[2].Trim()
+    $actual = (Get-FileHash (Join-Path .\challenge_data $name) -Algorithm SHA256).Hash.ToLower()
+    if ($actual -ne $expected) { throw "Checksum mismatch: $name" }
+    "$name`: OK"
+}
 ```
 
-The release is a real, curated subset of the Microsoft Azure Public Dataset V2. It is not synthetic data.
+The dataset is distributed as a release asset and is intentionally not committed to this repository.
 
-The dataset contains 10,000 VMs with 134 CPU measurements per VM at five-minute intervals, for a total of 1,340,000 CPU observations.
+## Generate predictions
 
-Use the exact `data-v1` release provided for this assignment. Do not substitute another dataset or a different version of the Azure Public Dataset.
-
-## What you are solving
-
-The underlying data contains anonymized VM workload telemetry sampled every five minutes. Your job is to understand the workload and build a defensible forecasting pipeline for near-term aggregate demand.
-
-The challenge is intentionally open-ended. We evaluate reasoning, time-series methodology, leakage prevention, error analysis, reproducibility, and the quality of your operational conclusions—not just model complexity.
-
-## Expected environment
-
-Python 3.11+ is recommended.
+From the repository root, run:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
-pytest -q
+python -m cwfc.predict --data challenge_data --output predictions.csv
 ```
 
-Model dependencies are intentionally not prescribed. Add only what you need and document them.
+The default holdout is the final 24 timestamps. The generated CSV contains exactly `timestamp,active_vm_count,aggregate_cpu_utilization`, in chronological order, without an index. Predictions are validated for matching timestamps, finite values, non-negative VM counts, and CPU utilization in `[0,100]`. To use another horizon explicitly, pass `--holdout N`.
 
-## Source
+## Run tests
 
-Microsoft Azure Public Dataset V2:
-https://github.com/Azure/AzurePublicDataset
+```bash
+python -m pytest -q
+```
 
-The official V2 documentation describes a 30-day VM trace with five-minute CPU readings, VM metadata, and encrypted subscription/deployment/VM identifiers. The full upstream trace is much larger than this challenge release.
+The tests include output-contract checks, a tiny synthetic end-to-end dataset, and a leakage check that changes holdout targets and verifies the forecasts remain unchanged.
 
-## Submission
+## Modeling decisions
 
-Submit your work as a repository or archive according to [`SUBMISSION.md`](SUBMISSION.md).
+- **Targets and leakage control:** Targets are aggregated from VM-level readings. The final holdout is separated before model selection or fitting; its target values are excluded from CV, selection, and forecast calls. Metadata CPU-summary columns are not model features.
+- **Candidates:** exactly three forecasters are compared: `Last12Mean` (the moving-average baseline), Ridge using lagged target values, and damped exponential smoothing (ETS).
+- **Validation:** expanding rolling-origin cross-validation uses only the training partition, with a 50-point minimum training window, 24-step forecast horizon, and 6-point origin step. Each candidate is scored by fold MAE and RMSE.
+- **Selection:** rank by mean CV MAE. Ridge or DampedETS is selected only when it improves on `Last12Mean` by at least 3%; otherwise the baseline wins. When the two model candidates tie, prefer DampedETS.
+- **Intervals:** the selected candidate's residuals (actual minus forecast) are pooled across CV folds. Their 10th and 90th percentiles define the 80% interval; bounds are clipped to the valid target ranges.
+- **Capacity policy:** CV compares exactly three CPU provisioning policies: forecast alone, forecast plus half the upper interval margin, and forecast plus the full margin. The full-margin policy reduces shortfall risk at the cost of more unused headroom; `notes.md` records the CV comparison and recommendation.
+
+The final holdout scores and one-time forecast table are documented in `notes.md`; they are not used to retune the model or policy.
