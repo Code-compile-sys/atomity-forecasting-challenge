@@ -12,12 +12,11 @@ personal_notes.md
 personalNotes.md
 
 .vscode/
-AGENTS.md
-ASSIGNMENT.md
-CODE_OF_CONDUCT.md
-DATA_CARD_TEMPLATE.md
-DATA_RELEASE.md
-DATASET.md
-SOURCES.md
-SUBMISSIONS.md
+
+# Ignore Markdown except the project README, notes, report, and data-folder README
+*.md
+!/README.md
+!/notes.md
+!/reports/final_report.md
+!/challenge_data/README.md
 
