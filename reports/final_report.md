@@ -106,6 +106,20 @@ All models have zero error for VM count because it does not change in training. 
 
 ![Mean CPU CV MAE and RMSE for the three candidates.](figures/cv_cpu_scores.png)
 
+### Extra experiment: XGBoost (not used in the final pipeline)
+
+We tested XGBoost with sliding-window features as a separate experiment using only the first 110 timestamps. It did not use holdout targets or change the submitted pipeline. Features used past-only lags (1, 2, 3, 6, 12, 24), window summaries (mean, spread, min, max, trend, peaks, zero crossings), and three Fourier values over 6-, 12-, and 24-reading windows. Forecasts were recursive. We tuned 64 settings across squared-error and absolute-error losses using earlier CV folds, then scored folds 6 and 7.
+
+| Model | Folds 6–7 mean MAE | Folds 6–7 mean RMSE |
+|---|---:|---:|
+| XGBoost, squared-error loss | 0.1968 | 0.2321 |
+| XGBoost, absolute-error loss | 0.1728 | 0.2038 |
+| Last12Mean | 0.1430 | 0.1675 |
+| Ridge | 0.1550 | 0.1790 |
+| DampedETS | **0.1078** | **0.1254** |
+
+DampedETS remained best on both measures. Absolute-error XGBoost beat Last12Mean and Ridge, but not DampedETS. Two later folds are too few to justify adding XGBoost.
+
 ### Final holdout check (run once)
 
 After model selection, the selected models were fit on the first 110 points and used to forecast the final 24. Holdout actuals were used only to calculate these scores. No model, policy, or parameter was changed after seeing them.

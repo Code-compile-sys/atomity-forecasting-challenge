@@ -170,6 +170,24 @@ Rows are ordered by `datetime`. Row ranges use `[start:end)`, meaning the start 
 | 6 | `[0:80)` | `[80:104)` |
 | 7 | `[0:86)` | `[86:110)` |
 
+## Extra experiment: XGBoost with sliding-window features (training-only)
+
+XGBoost was tested separately and was not added to the prediction pipeline. The experiment used only the first 110 timestamps; it did not use the final 24 holdout target values.
+
+For each forecast step, features were calculated from past target values only: lags 1, 2, 3, 6, 12, and 24; mean, standard deviation, minimum, maximum, trend, peak count, zero-crossing count, and three Fourier magnitudes over trailing windows of 6, 12, and 24 points. Forecasts were made recursively, so each predicted value was used to form the next step's features.
+
+We tested 64 combinations across two training losses, `reg:squarederror` and `reg:absoluteerror`. Settings included tree count (40 or 100), tree depth (1 or 2), learning rate (0.03 or 0.1), minimum child weight (1 or 5), and regularization (1 or 10). Mean MAE on inner rolling-origin folds selected the settings. For each of the last two training-only folds (folds 6 and 7), tuning used earlier folds only; that fold's validation values were used only for the comparison below.
+
+| Model | Folds 6–7 mean MAE | Folds 6–7 mean RMSE |
+|---|---:|---:|
+| XGBoost, squared-error loss | 0.1968 | 0.2321 |
+| XGBoost, absolute-error loss | 0.1728 | 0.2038 |
+| Last12Mean | 0.1430 | 0.1675 |
+| Ridge | 0.1550 | 0.1790 |
+| DampedETS | 0.1078 | 0.1254 |
+
+DampedETS remained best on both measures. XGBoost with absolute-error loss did better than Last12Mean and Ridge on these two folds, but not DampedETS. This is a small comparison using only two later folds, so it is not strong evidence that XGBoost would perform better on new data. The experiment changed no source files or dependency declarations, and XGBoost is not a candidate in the submitted pipeline.
+
 ## Optional 80% prediction intervals
 
 For each target, the model is selected using CV on training data. Its errors from all CV folds and forecast steps are pooled. An error is actual minus forecast. The 10th and 90th percentiles of these errors are added to the final forecast to form the 80% interval. Count forecasts are clipped to zero or above; CPU forecasts and bounds are clipped to `[0,100]`. The interval output is separate from the required point-prediction CSV.
