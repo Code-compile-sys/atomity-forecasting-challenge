@@ -1,82 +1,64 @@
-#  Training-only EDA notes
+# Training-only EDA notes
 
-## Scope and leakage control
+## What data was used
 
-The analysis uses `build_targets()` to form the aggregate time series, then applies the required chronological 24-timestamp holdout split. All reported EDA statistics below use the first 110 target timestamps and the VM-level readings at those training timestamps only. Holdout target values are not summarized, charted, or used to draw conclusions. Metadata CPU summary fields (`max_cpu`, `avg_cpu`, and `p95_max_cpu`) are excluded from all segment analyses.
+The target series was built from VM-level readings, then split by time: the first 110 timestamps are training data and the final 24 are held out. All EDA numbers and model choices below use only the 110 training timestamps and their VM readings. The holdout values were not used for those calculations or choices.
+
+The original timestamps are seconds from the start of the source trace. A UTC datetime column is used to order and model the data, but it does not represent the workload's actual local date or time. Metadata CPU summary columns (`max_cpu`, `avg_cpu`, and `p95_max_cpu`) were not used as features.
 
 ## Data coverage and quality
 
-- The training partition contains 110 five-minute timestamps, from raw timestamp 0 through 32,700 seconds (UTC 00:00 through 09:05 in the source-relative time representation).
-- The observed training cadence is exactly 300 seconds, with no gaps in the target timestamp sequence.
-- The training readings contain 1,100,000 VM-level records and represent 10,000 distinct VMs.
-- There are no missing timestamps, VM IDs, or `avg_cpu` values among those training readings, and no duplicate `(timestamp, vm_id)` pairs.
-- Every observed training `avg_cpu` value is within the documented 0–100 percent range.
-- The source timestamps are seconds relative to the trace, not real-world wall-clock time. The derived UTC dates therefore should not be interpreted as the actual date/time of the workload.
+- The training data has 110 timestamps at five-minute intervals, from raw timestamp 0 to 32,700 seconds (source-relative UTC 00:00 to 09:05).
+- The interval between timestamps is always 300 seconds. There are no gaps or duplicate aggregate timestamps.
+- The training readings contain 1,100,000 rows and 10,000 distinct VMs.
+- No training rows have a missing timestamp, VM ID, or `avg_cpu`. There are no duplicate `(timestamp, vm_id)` pairs.
+- All training `avg_cpu` values are between 0 and 100 percent.
+- These timestamps are seconds from trace start, not real-world clock times. Do not interpret the UTC conversion as the actual time of day.
 
-### Timestamp quality (training partition only)
+### Timestamp checks (training only)
 
-**Cadence**
-Value: 300 seconds
-So what: Data is collected every 5 minutes and appears suitable for fixed-interval forecasting.
+| Check | Result | What it means |
+|---|---:|---|
+| Time between readings | 300 seconds | The series is sampled every 5 minutes. |
+| Missing time points | 0 | No training timestamps are missing. |
+| Duplicate target timestamps | 0 | Each aggregated time point appears once. Multiple VM rows at one time are expected. |
 
-**Number of gaps**
-Value: 0
-So what: No adjacent training timestamps exceed the typical 300-second interval.
+## VM lifetimes and changes in the VM set (training only)
 
-**Number of duplicate timestamps**
-Value: 0
-So what: Each aggregated training timestamp is unique; repeated raw VM rows at a timestamp are expected and are not counted as duplicate time-series points.
+The observed lifetime here is the time between a VM's first and last reading in the training data. It may not be the VM's full lifetime: the data starts and ends at boundaries, so VMs may have existed before the first timestamp or continued after the last.
 
-## VM lifetimes and churn (training partition only)
+| Measure | Result | What it means |
+|---|---:|---|
+| Median observed VM span | 32,700 seconds (9.08 hours) | The typical VM appears throughout the observed training period. |
+| Mean observed VM span | 32,700 seconds (9.08 hours) | All 10,000 VMs have the same observed first-to-last span. |
+| VMs first seen after the start | 0 | No new VMs appear inside the observed training window. |
+| VMs last seen before the end | 0 | No VMs disappear inside the observed training window. |
 
-Lifetime is measured as elapsed seconds between a VM's first and last observed training readings. This is an observed window, not necessarily the VM's full provisioned lifetime. The start boundary is left-censored (VMs could have existed earlier) and the end boundary is right-censored (VMs may persist later), so boundary first/last appearances are not counted as confirmed arrivals/departures.
+All 10,000 VMs appear at the first training timestamp and remain through the last one. Because the window edges hide what happened before and after the trace, this does not prove that the VMs were created or deleted at those times. We see no changes in the VM set within this short window, but cannot draw conclusions about the wider fleet.
 
-**Median observed VM lifetime**
-Metric: 32,700 seconds (9.08 hours)
-So what: The typical VM is observed throughout the available training window; its true lifetime may be longer.
+## CPU use across individual VMs (training only)
 
-**Mean observed VM lifetime**
-Metric: 32,700 seconds (9.08 hours)
-So what: All 10,000 VMs have the same first-to-last observed span in training.
+Each number below is a VM's average CPU use across its training readings.
 
-**VM arrivals within the observed training window**
-Metric: 0
-So what: No VMs first appear after the left-censored start boundary.
+| Measure | Result | What it means |
+|---|---:|---|
+| VMs averaging below 5% CPU | 4,635 (46.35%) | Nearly half of the VMs have low average CPU use. |
+| VMs averaging above 50% CPU | 220 (2.20%) | Few VMs have high average use; this does not rule out short spikes. |
 
-**VM departures within the observed training window**
-Metric: 0
-So what: No VMs disappear before the right-censored end boundary.
+## Aggregate CPU over time (training only)
 
-All 10,000 VMs are first seen at the training start and last seen at its end. These boundary counts are censored observations, not evidence that 10,000 VMs were actually created/deleted then. This slice shows no measurable internal churn, but cannot establish VM lifetimes or behavior outside the training window.
+The aggregate series is the mean of VM-level `avg_cpu` at each timestamp. Its trailing 12-reading average uses the current reading and the previous 11 readings (one hour total).
 
-## Per-VM CPU utilization (training partition only)
-
-For each VM, mean CPU is computed from its `avg_cpu` readings at training timestamps only.
-
-**VMs with mean CPU <5%**
-4,635 VMs (46.35%)
-That means : Nearly half of the VMs average below 5% CPU, indicating substantial low-utilization capacity in this trace.
-
-**VMs with mean CPU >50%**
-220 VMs (2.20%)
-That means : Only a small share sustain mean CPU above 50%; this does not rule out short-lived utilization spikes.
-
-## Aggregate CPU series (training partition only)
-
-The notebook plots aggregate CPU at each five-minute training timestamp with a trailing 12-observation (one-hour) rolling mean. The rolling window uses only the current and previous observations.
-
-- **Trend:** the trailing mean decreases from 9.411% at its first complete window to 9.216% at the final training timestamp. This suggests a modest decline across the observed training period, not a long-term trend.
-- **Volatility:** the target standard deviation is 0.194 percentage points, with values ranging from 9.112% to 9.912%. The aggregate is comparatively stable despite the much wider VM-level CPU distribution.
-- **Seasonality:** no daily/weekly pattern can be established from approximately nine hours of observations. Short-term local variation is visible but is not evidence of recurring seasonality.
-- **Spikes/outliers:** the maximum training value is 9.912% at raw timestamp 16,500 seconds. This is a local peak; it is not labeled an anomaly without a separate, pre-specified anomaly rule.
-
-## Temporal utilization patterns (training partition only)
-
-The 110 training observations span only one source-relative UTC date, from 00:00 to 09:05. Since raw timestamps are seconds relative to trace start, the converted UTC weekday/hour are not actual workload wall-clock time. Hour means below are grouped by elapsed hours from trace start.
+- The trailing one-hour average falls from 9.411% at its first complete window to 9.216% at the end of training. This is a small decline in this short sample, not proof of a long-term trend.
+- Aggregate CPU has a standard deviation of 0.194 percentage points, and ranges from 9.112% to 9.912%.
+- The highest aggregate CPU reading is 9.912% at raw timestamp 16,500 seconds. This is a local high point, not an anomaly identified by a formal rule.
+- About nine hours of data is not enough to establish a daily or weekly pattern.
 
 ### Mean CPU by elapsed hour
 
-| Elapsed hour | Mean aggregate CPU | Observations |
+Hours are counted from the start of the trace. Hour 9 is only partially observed.
+
+| Elapsed hour | Mean aggregate CPU | Readings |
 |---:|---:|---:|
 | 0 | 9.411% | 12 |
 | 1 | 9.405% | 12 |
@@ -89,52 +71,44 @@ The 110 training observations span only one source-relative UTC date, from 00:00
 | 8 | 9.239% | 12 |
 | 9 | 9.138% | 2 |
 
-**Value:** The peak hourly mean is 9.707% in elapsed hour 5 (12 observations); the lowest is 9.138% in elapsed hour 9 (only 2 observations).
-**So what:** CPU is higher around hours 4–5 and falls later in the observed window, but the final partial-hour minimum is based on only two samples; use these as short-window monitoring signals, not a clock-based schedule.
+The highest full-hour mean is 9.707% in elapsed hour 5. The lowest is 9.138% in hour 9, but that value uses only two readings. CPU is higher around hours 4–5 and lower later in this sample. Treat this as a short-term observation, not a schedule for future demand.
 
-### Day-of-week support
+Only one source-relative weekday appears (Thursday UTC). The autocorrelation is 0.367 at a one-hour lag and -0.026 at a two-hour lag. These values do not prove a repeating cycle; the training history is too short to establish one.
 
-**Value:** 1 source-relative weekday represented (all 110 observations map to Thursday UTC).
-**So what:** Day-of-week comparisons are unsupported; more than one real calendar week of correctly anchored timestamps would be required.
+## Overall workload shape
 
-### Repeating utilization cycles
+- `active_vm_count` is 10,000 at every training timestamp. There is no change in count to learn from this sample. Forecasts should not be taken as evidence that a larger production fleet has no churn.
+- Aggregate CPU averages 9.414%, with a standard deviation of 0.194 percentage points and a range of 9.112%–9.912%.
+- Individual VM readings vary much more than the aggregate: mean 9.414%, median 5.120%, 75th percentile 9.648%, 95th percentile 37.293%, and maximum 99.488%.
+- Aggregate CPU is highest around raw timestamps 16,500–20,400 seconds. Its lowest value is about 9.112% at raw timestamp 32,400 seconds. These are local changes, not evidence of a repeating daily cycle.
 
-**Value:** Lag-1-hour autocorrelation is 0.367; lag-2-hour autocorrelation is -0.026.
-**So what:** These exploratory correlations do not establish a repeating cycle; the short training window has insufficient repeated periods to justify seasonal forecasts.
+The aggregate average is steady even though individual VM CPU values vary widely. For operations, this means the overall average alone may hide busy individual VMs.
 
-## Workload shape
+## Differences between VM groups
 
-- `active_vm_count` is constant at 10,000 for every training timestamp. It provides no variation to forecast within this window; any forecast should respect the count’s nonnegative interpretation and should not claim evidence of churn from this segment.
-- Aggregate CPU utilization averages 9.414%, with a standard deviation of 0.194 percentage points and a training range of 9.112%–9.912%.
-- By contrast, the distribution of the 1.1 million VM-level readings is much wider: mean 9.414%, median 5.120%, 75th percentile 9.648%, 95th percentile 37.293%, and maximum 99.488%. This right-skew and spread show that the aggregate mean conceals substantial VM-level heterogeneity.
-- Training-period CPU peaks occur around raw timestamps 16,500–20,400 seconds; the maximum aggregate CPU value is approximately 9.912%. The smallest value is approximately 9.112% at raw timestamp 32,400 seconds. These are local fluctuations, not evidence of recurring daily cycles.
+The group labels below are supplied in the metadata; no new group cutoffs were created:
 
-## Segment differences
+- Workload category: `Delay-insensitive`, `Interactive`, `Unknown`.
+- Virtual-core groups: `2`, `4`, `8`, `24`, `>24`.
+- Memory groups in GB: `2`, `4`, `8`, `32`, `64`, `>64`.
 
-Segmentation uses the upstream metadata buckets as supplied; no new cutoffs or derived `core_bucket` / `memory_bucket` columns were needed:
+The `>24` and `>64` labels are open-ended categories, not exact numbers. Metadata CPU summary fields were excluded.
 
-- `vm_category`: Azure workload category (`Delay-insensitive`, `Interactive`, `Unknown`).
-- `virtual_core_bucket`: supplied virtual-core count buckets (`2`, `4`, `8`, `24`, `>24`).
-- `memory_gb_bucket`: supplied memory-in-GB buckets (`2`, `4`, `8`, `32`, `64`, `>64`).
-
-These fields are categorical bucket labels; `>24` and `>64` remain open-ended labels, not numeric values for modeling. CPU-summary metadata columns are excluded from CPU segment summaries.
-
-For each dimension, average CPU is the mean of VM-level `avg_cpu` readings at training timestamps. Aggregate utilization contribution is defined as `100 × segment sum(avg_cpu) / sum(avg_cpu across all training VM readings)`. This is the share of summed CPU utilization readings; it is not a share of VM capacity, since core counts/capacity are not available as exact values. Per-VM reading coverage is balanced for this training slice.
+For each group, average CPU is the mean of its VM-level `avg_cpu` readings during training. “Share of summed CPU readings” means 100 times the group's sum of CPU readings divided by the sum across all training VMs. It is not a share of hardware capacity because exact VM capacity is not available. Reading coverage is balanced across VMs in this training slice.
 
 ### Workload category
 
-| Category | VM count | Average CPU | Aggregate utilization contribution |
+| Category | VM count | Average CPU | Share of summed CPU readings |
 |---|---:|---:|---:|
 | Delay-insensitive | 6,180 | 8.257% | 54.206% |
 | Interactive | 3,091 | 11.505% | 37.776% |
 | Unknown | 729 | 10.355% | 8.018% |
 
-**Observation:** Interactive VMs average 11.505% CPU, higher than Delay-insensitive VMs at 8.257%, while Delay-insensitive VMs contribute the largest total share (54.206%) due to their larger population.
-**So what:** Capacity planning should consider both workload intensity and segment population; per-category forecasts could distinguish high per-VM demand from high total contribution.
+Interactive VMs have the highest average CPU among the large categories, while Delay-insensitive VMs contribute the largest total share because there are more of them. Capacity planning should consider both how busy a group is and how many VMs it contains.
 
-### Virtual-core bucket
+### Virtual-core group
 
-| Core bucket | VM count | Average CPU | Aggregate utilization contribution |
+| Core group | VM count | Average CPU | Share of summed CPU readings |
 |---|---:|---:|---:|
 | 2 | 7,534 | 9.764% | 78.142% |
 | 4 | 1,908 | 7.919% | 16.049% |
@@ -142,12 +116,11 @@ For each dimension, average CPU is the mean of VM-level `avg_cpu` readings at tr
 | 24 | 62 | 11.429% | 0.753% |
 | >24 | 10 | 6.619% | 0.070% |
 
-**Observation:** The 2-core bucket accounts for 78.142% of the summed CPU readings, and the 24-core bucket has the highest mean (11.429%) but only 62 VMs.
-**So what:** The common 2-core segment dominates aggregate behavior, while high averages in small segments need uncertainty-aware interpretation due to low sample counts.
+The 2-core group accounts for most summed CPU readings (78.142%). The 24-core group has the highest average (11.429%), but contains only 62 VMs. A high average in a small group does not mean that group drives most total demand.
 
-### Memory bucket
+### Memory group
 
-| Memory bucket (GB) | VM count | Average CPU | Aggregate utilization contribution |
+| Memory group (GB) | VM count | Average CPU | Share of summed CPU readings |
 |---|---:|---:|---:|
 | 2 | 3,904 | 8.802% | 36.503% |
 | 4 | 2,475 | 11.460% | 30.128% |
@@ -156,21 +129,21 @@ For each dimension, average CPU is the mean of VM-level `avg_cpu` readings at tr
 | 64 | 82 | 11.217% | 0.977% |
 | >64 | 10 | 6.619% | 0.070% |
 
-**Observation:** 2-GB VMs contribute the largest share (36.503%) by population, while 4-GB VMs have the highest mean CPU (11.460%) among the larger groups.
-**So what:** Aggregated demand is shared across the common small-memory segments; segment averages alone do not identify total capacity demand.
+The 2-GB group contributes the largest share (36.503%). The 4-GB group has the highest average CPU among the larger groups (11.460%). Group averages alone do not tell us how much total capacity each group needs.
 
-These are descriptive statistics from the training window, not causal effects or validated forecasts. Small buckets (especially 24-core, >24-core, 64-GB, and >64-GB) have low sample counts, so their averages may be unstable.
+These are descriptions of this training sample, not proof that group membership causes different CPU use. Results for small groups, especially 24-core, >24-core, 64-GB, and >64-GB, may be less reliable because they contain few VMs.
 
-## Modeling implications and caveats
+## What the data means for forecasting
 
-- With only about 9 hours of training history and five-minute sampling, the data cannot support claims about daily or weekly seasonality. Calendar seasonal features would be weakly justified for this source-relative trace.
-- Since the active count is flat in training, a simple persistence forecast is an important baseline for that target. CPU utilization changes modestly at the aggregate level, while individual VM readings vary considerably.
-- Segment-level CPU differences may motivate diagnostics, but using metadata CPU-summary fields would leak precomputed target-like information and is prohibited. Only segment labels and training-period readings were used here.
-- EDA and all model/hyperparameter choices must remain inside the 110-timestamp training partition. Use rolling-origin validation there; reserve the final 24 timestamps for the required final evaluation only.
+- The training history is about nine hours long, so it cannot support daily or weekly seasonal forecasts.
+- The VM count is flat, making a simple average forecast a useful baseline for that target.
+- Aggregate CPU changes modestly, while individual VM readings vary much more.
+- Group labels can help describe workloads, but metadata CPU summaries (`max_cpu`, `avg_cpu`, `p95_max_cpu`) must not be used as features because they contain CPU information.
+- Model choices use rolling-origin validation within the first 110 timestamps. The final 24 timestamps are kept for the one-time final evaluation.
 
-## Focused three-candidate CV
+## Comparing the three forecasting candidates (training-only CV)
 
-The current evaluator compares exactly the last-12 moving mean, Ridge, and Damped ETS for any requested target column. It receives only the training partition, orders each fold by `datetime`, and returns per-fold plus mean MAE and RMSE; normalized MAE and sMAPE remain guarded in the metric helpers but are not added to this comparison output.
+The evaluator compares exactly three candidates for each target: the average of the last 12 values (`Last12Mean`), Ridge, and damped exponential smoothing (`DampedETS`). For each, it reports MAE and RMSE for each fold and the average across folds. The metric helpers also guard normalized MAE and sMAPE against division by zero, but those metrics are not part of this focused comparison.
 
 | Target | Model | Mean MAE | Mean RMSE |
 |---|---|---:|---:|
@@ -181,11 +154,13 @@ The current evaluator compares exactly the last-12 moving mean, Ridge, and Dampe
 | `aggregate_cpu_utilization` | Ridge | 0.224 | 0.255 |
 | `aggregate_cpu_utilization` | DampedETS | 0.244 | 0.275 |
 
-Each target has seven rolling-origin folds (50 initial observations, 24-step horizon, 6-step advance). All three methods tie on the constant active-count target; Ridge has the lowest mean MAE and RMSE among these candidates for aggregate CPU utilization. No final-holdout target values enter evaluation.
+There are seven folds per target. Each fold starts with at least 50 training points, forecasts 24 points, then advances the starting point by 6. All candidates have zero error on the constant VM-count series. Ridge has the lowest average MAE and RMSE for CPU in CV. No holdout target values are used here.
 
-Fold boundaries are ordered by `datetime`; each fold's validation window is 24 points, with the origin advancing six points:
+### Fold boundaries
 
-| Fold | Train rows `[start:end)` | Validation rows `[start:end)` |
+Rows are ordered by `datetime`. Row ranges use `[start:end)`, meaning the start row is included and the end row is not.
+
+| Fold | Training rows | Validation rows |
 |---:|---|---|
 | 1 | `[0:50)` | `[50:74)` |
 | 2 | `[0:56)` | `[56:80)` |
@@ -197,20 +172,20 @@ Fold boundaries are ordered by `datetime`; each fold's validation window is 24 p
 
 ## Optional 80% prediction intervals
 
-`forecast_targets_with_intervals()` selects the winner separately for both targets using training-only CV, pools that model's actual-minus-forecast residuals across all folds and horizon steps, and offsets its final forecast by the pooled 10th/90th residual quantiles. It clips VM counts at zero and CPU utilization to `[0,100]`; only holdout timestamps are supplied, and the interval table is separate from the required point-prediction CSV.
+For each target, the model is selected using CV on training data. Its errors from all CV folds and forecast steps are pooled. An error is actual minus forecast. The 10th and 90th percentiles of these errors are added to the final forecast to form the 80% interval. Count forecasts are clipped to zero or above; CPU forecasts and bounds are clipped to `[0,100]`. The interval output is separate from the required point-prediction CSV.
 
 ## Aggregate CPU error analysis (training-only CV)
 
-The selected model was Ridge. The peak cutoff is the training-series 90th percentile, **9.6684% CPU**. The seven 24-step folds contribute 168 forecast cases; because folds overlap, cases are repeated across forecast origins.
+Ridge is selected for CPU. “Peak” means an actual training-series value above its 90th percentile, 9.6684%. The seven folds contain 168 forecast cases. Folds overlap, so some timestamps appear in more than one case.
 
-| Point group | Forecast cases | MAE | RMSE | Bias (actual − forecast) |
+| Group | Forecast cases | MAE | RMSE | Average error (actual − forecast) |
 |---|---:|---:|---:|---:|
 | Peak (`actual > 9.6684%`) | 27 | 0.4104 | 0.4611 | +0.4104 |
 | Non-peak | 141 | 0.1885 | 0.2279 | +0.1400 |
 
-**So what:** Peak errors are more than twice as large, and positive bias in both groups means Ridge tends to under-forecast, especially during high CPU periods.
+Errors are larger during peaks—more than twice the non-peak MAE. The positive average error in both groups means Ridge tends to forecast too low, especially at peaks.
 
-### Fold MAE ranking
+### Folds ranked by MAE
 
 | Rank | Fold | MAE |
 |---:|---:|---:|
@@ -222,42 +197,39 @@ The selected model was Ridge. The peak cutoff is the training-series 90th percen
 | 6 | 7 | 0.1446 |
 | 7 | 4 | 0.1076 |
 
-**Fold 1 likely reason:** The actual CPU rises into a sustained high period (9.91% peak) while Ridge remains near 9.2–9.4%, indicating under-response to the rise.
+- **Fold 1 likely reason:** Actual CPU rises to a sustained high point (9.91%), but Ridge stays around 9.2–9.4% and does not rise enough.
+- **Fold 2 likely reason:** Ridge gradually forecasts lower values while actual CPU stays high, then actual CPU drops near the end. The forecast misses both changes.
 
-**Fold 2 likely reason:** Ridge recursively drifts downward while actual CPU remains elevated, then the actual series drops late in the window; the forecast misses both the level and transition.
+The largest errors occur in early validation folds, where the recent training history is less like the values that follow. These are likely explanations, not proven causes.
 
-**So what:** Most error is concentrated in early validation origins where the recent training history poorly represents subsequent CPU levels and changes.
+### Error by forecast step
 
-### Optional MAE by horizon step
+Across folds, the lowest step MAE is **0.1092 at step 2**; the highest is **0.3798 at step 16**. Error does not increase steadily with each step, so this short series does not support a simple rule that forecasts always get worse at longer horizons.
 
-Across folds, the lowest horizon-step MAE was **0.1092 at step 2** and the highest was **0.3798 at step 16**.
+## Comparing CPU capacity policies (training-only CV)
 
-**So what:** Error varies irregularly by forecast step rather than increasing monotonically, so a simple horizon-dependent error assumption is not supported by this short trace.
+The selected CPU model is Ridge. The extra margin is the 90th percentile of its pooled CV errors: **0.4984 CPU percentage points**. The table uses all 168 CV cases, not the final holdout.
 
-## Aggregate CPU provisioning policy comparison (training-only CV)
-
-The selected model is Ridge. The upper 80% interval margin is the pooled 90th-percentile of its CV residuals (actual minus forecast), **0.4984 percentage points**. The table scores all 168 CV forecast cases; the final holdout is excluded.
-
-| Policy | Under-provisioning rate | Average shortfall | Wasted headroom |
+| Policy | Under-provisioned cases | Average shortfall | Wasted headroom |
 |---|---:|---:|---:|
-| A: forecast | 82.14% | 0.2481 | 0.1139 |
-| B: forecast + half upper-interval margin | 32.74% | 0.1679 | 0.1795 |
-| C: forecast + full upper-interval margin | 10.12% | 0.0868 | 0.3601 |
+| A: forecast only | 82.14% | 0.2481 | 0.1139 |
+| B: forecast + half the upper interval margin | 32.74% | 0.1679 | 0.1795 |
+| C: forecast + full upper interval margin | 10.12% | 0.0868 | 0.3601 |
 
-Under-provisioning rate is the share of all points where actual exceeds provision; average shortfall averages actual minus provision on those cases. Wasted headroom averages provision minus actual only where provision meets or exceeds actual. Values are CPU percentage points except the rate.
+“Under-provisioned” means actual CPU is higher than the amount provided. Its rate is the share of all cases where that happens. Average shortfall is actual minus provision, averaged only over those cases. “Wasted headroom” is provision minus actual, averaged only over cases with enough capacity. The last two columns are CPU percentage points.
 
-**Recommendation:** Use Policy C for capacity planning when avoiding CPU shortfalls is the priority: it has the lowest under-provisioning rate (10.12%) and average shortfall (0.0868) on CV. Its trade-off is the largest wasted headroom (0.3601 percentage points), so use Policy B if the operational cost of spare capacity outweighs the increased shortfall risk.
+**Recommendation:** Use Policy C if avoiding CPU shortfalls is the main priority. It has the lowest CV shortfall rate (10.12%) and smallest average shortfall (0.0868), but leaves the most unused headroom (0.3601 percentage points). Policy B is a compromise if spare capacity is costly.
 
 ## Final holdout check (run once)
 
-The selected models were fit on the 110 training points only and forecast the final 24 timestamps. Interval bounds use the selected models' pooled training-CV residuals. The holdout actuals were used only for the final scores below, not for model or policy selection.
+The chosen models were fit on the first 110 points and used to forecast the final 24 timestamps. Their CV errors were used for interval bounds. Actual holdout values were used only to calculate the scores below—not to choose or change a model, policy, or parameter.
 
 | Target | Selected model | Selected MAE | Selected RMSE | Baseline | Baseline MAE | Baseline RMSE |
 |---|---|---:|---:|---|---:|---:|
 | `active_vm_count` | Last12Mean | 0.0000 | 0.0000 | Last12Mean | 0.0000 | 0.0000 |
 | `aggregate_cpu_utilization` | Ridge | 0.3012 | 0.3604 | Last12Mean | 0.1230 | 0.1613 |
 
-Policy C (full upper 80% interval margin) under-provisioned **25.00%** of CPU holdout points (6 of 24). Average wasted headroom was **0.3151 percentage points**, calculated on the 18 points where provision met or exceeded actual.
+On the CPU holdout, Policy C was below actual CPU at 6 of 24 points (25.00%). On the other 18 points, average wasted headroom was 0.3151 percentage points.
 
 | Raw timestamp (seconds) | Active VM forecast | Active VM lower 80% | Active VM upper 80% | CPU forecast | CPU lower 80% | CPU upper 80% |
 |---:|---:|---:|---:|---:|---:|---:|
@@ -286,4 +258,4 @@ Policy C (full upper 80% interval margin) under-provisioned **25.00%** of CPU ho
 | 39600 | 10000 | 10000 | 10000 | 8.877790 | 8.815442 | 9.376163 |
 | 39900 | 10000 | 10000 | 10000 | 8.874872 | 8.812523 | 9.373244 |
 
-This final holdout check was run once. No model, policy, or parameter was changed after reviewing these holdout results.
+This final holdout check was run once. No model, policy, or parameter was changed after seeing its results.

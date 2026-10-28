@@ -1,70 +1,99 @@
-# Cloud Workload Forecasting & Capacity Planning
+# Cloud Workload Forecasting and Capacity Planning
 
 ## 1. Executive summary
 
-This report evaluates short-horizon forecasts for two aggregate workload targets built from the Azure VM trace: `active_vm_count` and `aggregate_cpu_utilization`. The supplied series is sampled every five minutes. The forecasting protocol uses the first 110 timestamps for training and model selection, then reserves the final 24 timestamps as a two-hour public holdout. Raw timestamps are retained for output; a separate UTC datetime is used to order and model observations. Because source timestamps are seconds relative to the trace, their UTC conversion is a modeling convenience rather than actual workload wall-clock time.
+This project forecasts two measures from the Azure VM trace: `active_vm_count` and `aggregate_cpu_utilization`. Readings arrive every five minutes. The first 110 timestamps are used for model training and selection; the final 24 timestamps make up the two-hour holdout. The original timestamps, measured in seconds from trace start, are kept in the output. A separate UTC datetime is used to order and model the data; it is not the workload's actual local time.
 
-The model comparison is deliberately small: a last-12-observation moving-average baseline, Ridge regression on lagged target history, and damped exponential smoothing (ETS). Rolling-origin cross-validation (CV) is confined to the 110-point training partition. For aggregate CPU, Ridge has the lowest mean CV MAE (0.224 percentage points) among the three candidates, compared with 0.260 for Last12Mean and 0.244 for DampedETS. Ridge clears the 3% CV improvement threshold over the baseline and is therefore selected.
+We compared three approaches: the average of the last 12 readings (`Last12Mean`), Ridge regression using past CPU values, and damped exponential smoothing (`DampedETS`). We compared them using rolling-origin cross-validation (CV) on the first 110 timestamps only. For aggregate CPU, Ridge had the lowest average CV MAE: 0.224 percentage points, compared with 0.260 for Last12Mean and 0.244 for DampedETS. Ridge improved enough over the baseline to pass the 3% selection rule, so it was selected for CPU.
 
-The final holdout check was run once, after model and policy selection. CPU Ridge scored MAE 0.3012 and RMSE 0.3604, while Last12Mean scored 0.1230 and 0.1613, respectively. These results are recorded as a final evaluation and were not used to retune the model, policy, or parameters. For operational planning, the full upper-interval-margin policy is recommended when avoiding CPU shortfalls is the priority: on CV it under-provisioned 10.12% of cases, versus 82.14% for forecast-only provisioning, but left more wasted headroom. The limited trace, observable peak under-forecasting, and final holdout result all argue for treating this as a reproducible baseline and not a production capacity guarantee.
+The final holdout check was run once after the model and capacity policy were selected. On the CPU holdout, Ridge had MAE 0.3012 and RMSE 0.3604; Last12Mean had MAE 0.1230 and RMSE 0.1613. The baseline did better on this one holdout. These scores are reported as a final check only; they were not used to change the model, policy, or settings.
 
-## 2. Data understanding and preprocessing
+For capacity planning, we recommend adding the full upper interval margin to the forecast when avoiding CPU shortfalls is the priority. On CV, this policy was below actual CPU in 10.12% of cases, compared with 82.14% for using the forecast alone. The trade-off is more unused capacity. The short data window and weaker CPU result on the final holdout mean these findings are useful as a starting point, not a guarantee of production performance.
 
-The challenge release contains VM-level five-minute CPU readings and VM metadata. The target builder groups readings by raw timestamp, counts distinct VM IDs with valid CPU observations, and averages their `avg_cpu` values to form `aggregate_cpu_utilization`. Null timestamps, VM IDs, or CPU values are excluded from target construction. The aggregate target table preserves the original timestamp and adds a separate UTC `datetime` field. CPU-summary metadata fields (`max_cpu`, `avg_cpu`, and `p95_max_cpu`) are not used as predictors.
+## 2. Data understanding and preparation
 
-All reported training analysis and model selection use the first 110 target timestamps. The final 24 timestamp values are reserved for the holdout. The training timestamps span raw seconds 0 through 32,700, at a constant 300-second cadence, with no gaps or duplicate aggregate timestamps. The training readings contain 1,100,000 VM-level rows; no missing timestamps, VM IDs, or `avg_cpu` readings, no duplicate `(timestamp, vm_id)` pairs, and no training `avg_cpu` values outside the documented 0–100 range were reported.
+The release contains VM-level CPU readings and VM metadata. To build the required series, readings are grouped by their raw timestamp. At each timestamp, `active_vm_count` is the number of distinct VMs with a valid CPU reading, and `aggregate_cpu_utilization` is the average of the VMs' `avg_cpu` values. Rows with a missing timestamp, VM ID, or CPU reading are excluded. The original timestamp is retained, and a separate UTC datetime is added for time-based ordering and modeling. Metadata CPU summaries (`max_cpu`, `avg_cpu`, and `p95_max_cpu`) are not used as model inputs.
 
-Within the 110-point training window, `active_vm_count` is constant at 10,000. This is a survivorship effect of the observed cohort: the selected VMs are represented throughout the observed training interval, so this target evaluates persistence of this panel and does not establish that a broader cloud fleet has no arrivals or departures.
+All reported training analysis and model choices use the first 110 timestamps. The last 24 are held out. The training timestamps run from raw timestamp 0 through 32,700 seconds (source-relative UTC 00:00 through 09:05) and are spaced exactly 300 seconds apart. There are no gaps or duplicate aggregate timestamps. The training readings contain 1,100,000 VM-level rows. They have no missing timestamps, VM IDs, or `avg_cpu` values, no repeated `(timestamp, vm_id)` pairs, and no `avg_cpu` values outside the documented 0–100 range.
+
+Within the 110-point training window, `active_vm_count` is constant at 10,000. This is a survivorship effect of the observed cohort: the selected VMs appear throughout the observed training interval, so this target describes the observed group and does not show whether a wider cloud fleet has arrivals or departures.
 
 ## 3. Workload analysis
 
-### Aggregate level and temporal behavior
+### Overall CPU use and change over time
 
-Training-period aggregate CPU averages 9.414%, has a standard deviation of 0.194 percentage points, and ranges from 9.112% to 9.912%. Its trailing one-hour mean declines from 9.411% at the first complete window to 9.216% at the last training timestamp. This is a modest trend over a short observation period, not evidence of a long-run decline. The local maximum is 9.912% at raw timestamp 16,500 seconds, with high values around raw timestamps 16,500–20,400 seconds.
+During training, aggregate CPU averages 9.414%, has a standard deviation of 0.194 percentage points, and ranges from 9.112% to 9.912%. Its trailing one-hour average falls from 9.411% at the first full window to 9.216% at the last training timestamp. This is a small decline in this short sample, not proof of a long-term trend. The highest single aggregate reading is 9.912% at raw timestamp 16,500 seconds. High readings occur around raw timestamps 16,500–20,400 seconds.
 
-**Operational implication:** Short-term aggregate demand is relatively stable, but the observed decline and local high period show why a single level estimate can miss transitions. A safety margin should be assessed against time-aware validation rather than inferred from one chart.
+**Why it matters:** Average demand is fairly steady, but it does change. A capacity plan should account for possible increases rather than rely only on the overall average.
 
-The training interval is about nine hours. Elapsed-hour means rise from 9.361% in hour 3 to 9.707% in hour 5 and then decline; hour 9 has a mean of 9.138% based on only two observations. Only one source-relative weekday is represented, and lag-1-hour and lag-2-hour autocorrelations are 0.367 and -0.026. These summaries do not establish repeating daily or weekly seasonality.
+The training data covers about nine hours. Mean CPU by elapsed hour rises from 9.361% in hour 3 to 9.707% in hour 5, then falls. Hour 9 has a mean of 9.138%, but is based on just two readings. Only one source-relative weekday appears (all 110 timestamps map to Thursday UTC). The correlation between values one hour apart is 0.367; between values two hours apart it is -0.026. These results do not establish a repeating daily or weekly pattern.
 
-**Operational implication:** Hourly changes can inform near-term monitoring, but the partial final hour and lack of repeated days make calendar scheduling or seasonal capacity rules unsupported.
+**Why it matters:** The hourly changes may help with short-term monitoring, but the partial final hour and lack of repeated days are not enough to build a reliable clock-based schedule.
 
 ![Mean aggregate CPU by elapsed hour; hour 9 is based on two observations.](figures/hourly_cpu_means.png)
 
-### VM-level variation and segments
+### Individual VMs and workload groups
 
-The VM-level training readings are much more dispersed than the aggregate series. Their mean is 9.414%, median 5.120%, 75th percentile 9.648%, 95th percentile 37.293%, and maximum 99.488%. A total of 4,635 VMs (46.35%) have mean CPU below 5%, while 220 (2.20%) have mean CPU above 50%. Thus aggregate stability hides substantial differences between VM-level workloads.
+Individual VM readings vary much more than the aggregate average. Their mean is 9.414%, median 5.120%, 75th percentile 9.648%, 95th percentile 37.293%, and maximum 99.488%. A total of 4,635 VMs (46.35%) average below 5% CPU; 220 (2.20%) average above 50%.
 
-**Operational implication:** Aggregate CPU is suitable for the required overall forecast, but it should not be mistaken for uniform utilization across machines. The low-utilization mass and high individual observations suggest that segment-level monitoring could help identify where aggregate headroom is concentrated.
+**Why it matters:** A stable fleet average does not mean every VM is lightly loaded. Individual VMs may be much busier, so fleet-wide averages should be considered alongside machine-level monitoring.
 
-By workload category, Interactive VMs average 11.505% CPU and contribute 37.776% of summed CPU readings; Delay-insensitive VMs average 8.257% and contribute 54.206%; Unknown VMs average 10.355% and contribute 8.018%. The 2-core bucket accounts for 78.142% of summed CPU readings, while the 24-core bucket has the highest mean at 11.429% but contains 62 VMs. The 2-GB memory bucket contributes 36.503%; the 4-GB bucket has the highest mean among larger groups at 11.460%.
+The supplied metadata groups show different CPU levels and group sizes. Interactive VMs average 11.505% CPU and contribute 37.776% of summed CPU readings. Delay-insensitive VMs average 8.257% and contribute 54.206%; Unknown VMs average 10.355% and contribute 8.018%.
 
-**Operational implication:** Capacity decisions should account for both intensity and segment size. A high average in a small group is not equivalent to a large contribution to total demand; low-count buckets are also less stable. These contributions describe shares of summed CPU readings, not shares of provisioned capacity.
+| Workload category | VM count | Average CPU | Share of summed CPU readings |
+|---|---:|---:|---:|
+| Delay-insensitive | 6,180 | 8.257% | 54.206% |
+| Interactive | 3,091 | 11.505% | 37.776% |
+| Unknown | 729 | 10.355% | 8.018% |
+
+The 2-core group contributes 78.142% of summed CPU readings. The 24-core group has the highest average CPU, 11.429%, but contains only 62 VMs.
+
+| Virtual-core group | VM count | Average CPU | Share of summed CPU readings |
+|---|---:|---:|---:|
+| 2 | 7,534 | 9.764% | 78.142% |
+| 4 | 1,908 | 7.919% | 16.049% |
+| 8 | 486 | 9.658% | 4.986% |
+| 24 | 62 | 11.429% | 0.753% |
+| >24 | 10 | 6.619% | 0.070% |
+
+The 2-GB memory group contributes 36.503% of summed CPU readings; the 4-GB group has the highest average among the larger groups, at 11.460%.
+
+| Memory group (GB) | VM count | Average CPU | Share of summed CPU readings |
+|---|---:|---:|---:|
+| 2 | 3,904 | 8.802% | 36.503% |
+| 4 | 2,475 | 11.460% | 30.128% |
+| 8 | 2,146 | 9.143% | 20.843% |
+| 32 | 1,383 | 7.814% | 11.479% |
+| 64 | 82 | 11.217% | 0.977% |
+| >64 | 10 | 6.619% | 0.070% |
+
+**Why it matters:** Capacity planning should consider both how busy a group is and how many VMs it contains. The 24-core group has a high average but a small total share. The shares above refer to summed CPU readings, not hardware capacity. Results for small groups, especially 24-core, >24-core, 64-GB, and >64-GB, may be less reliable because those groups have few VMs. These summaries describe the data; they do not prove that group membership causes different CPU use.
 
 ## 4. Forecasting approach
 
-The three candidates share the same target-specific forecasting and validation path:
+We compared exactly three candidates:
 
-1. **Last12Mean baseline:** the average of the most recent 12 observed target values, corresponding to one hour at the supplied five-minute cadence.
-2. **Ridge:** a regularized linear model using target history only. Predictors use lags 1, 2, and 6 and trailing mean/standard deviation summaries over 3, 6, and 12 observations. Multi-step forecasts are recursive: each prediction is appended to the history for the next step.
-3. **Damped ETS:** damped exponential smoothing from statsmodels, fit to the training history and used to forecast the requested horizon.
+1. **Last12Mean:** averages the most recent 12 values, or one hour of readings. This is the simple baseline.
+2. **Ridge:** learns a relationship between a value and recent history. It uses lags 1, 2, and 6, plus trailing means and standard deviations over 3, 6, and 12 readings. To forecast multiple steps, it uses each forecast as input to the next step.
+3. **Damped ETS:** exponential smoothing with a damped trend, fit with statsmodels. It has no seasonal component because this dataset is too short to establish a repeating season.
 
-No metadata CPU summaries are used as model inputs. The implementation uses each target's training series and future timestamp template; future target values are not provided to the forecasters. Count forecasts are constrained to be nonnegative and CPU forecasts are clipped to `[0,100]`.
+All models use the target's past values only. Future target values are not provided to the forecasters. Count forecasts are kept at zero or above; CPU forecasts are kept between 0 and 100. No CPU-summary metadata is used as a model input.
 
-The winner is chosen from CV results by mean MAE. Ridge or DampedETS must improve on Last12Mean by at least 3%; otherwise the baseline is retained. If the two model candidates tie, the simpler candidate is preferred (DampedETS over Ridge). The rule is applied independently to each target, rather than hard-coding a final model choice.
+The model is chosen separately for each target using average CV MAE. Ridge or DampedETS must improve on Last12Mean by at least 3%; otherwise, Last12Mean is selected. If Ridge and DampedETS tie, DampedETS is preferred as the simpler model.
 
-## 5. Validation methodology
+## 5. Validation method
 
-The evaluator uses expanding rolling-origin CV inside the 110-point training partition. Each fold begins with at least 50 training observations, forecasts the next 24 timestamps, and advances its origin by six timestamps. This produces seven folds. Validation windows overlap, so the resulting 168 forecast cases per target are not 168 unique timestamps.
+We used expanding rolling-origin cross-validation on the training data. Each fold starts with at least 50 observations, forecasts the next 24, and moves forward by 6 observations to create the next fold. This produces seven folds. The validation windows overlap, so the 168 forecast cases are not 168 separate timestamps.
 
-This design preserves chronology and approximates repeated operational forecast origins: at each origin, the model sees the history that would have been available then and forecasts the next two hours. It avoids random shuffling, which would expose future regimes to training and make evaluation less representative of deployment. Most importantly, the final 24 target values are never used in these folds, feature construction, model selection, or fitting.
+This approach tests the models in time order. At each step, the model uses only data that would have been available at that point, then forecasts the next two hours. Unlike a random split, it does not mix future points into the training data. The final 24 timestamps are not used for cross-validation, model selection, or fitting.
 
-Per-fold and mean MAE and RMSE are reported. The report uses percentage-point CPU errors, not relative percentages. The final holdout is scored only after model and policy choices are fixed. The documented analysis does not provide fold-level numeric model-score tables for every candidate beyond their aggregate means; no additional values are inferred here.
+We report MAE and RMSE for each fold and average them across folds. CPU errors are in percentage points. The existing focused comparison does not report numeric values for normalized MAE or sMAPE, so this report does not add them.
 
-## 6. Results versus baseline
+## 6. Results compared with the baseline
 
-The table gives mean rolling-origin CV scores from the training partition. Lower is better.
+The table shows average CV errors on the training data. Lower errors are better.
 
-| Target | Candidate | Mean CV MAE | Mean CV RMSE |
+| Target | Model | Mean CV MAE | Mean CV RMSE |
 |---|---|---:|---:|
 | `active_vm_count` | Last12Mean | 0.000 | 0.000 |
 | `active_vm_count` | Ridge | 0.000 | 0.000 |
@@ -73,34 +102,59 @@ The table gives mean rolling-origin CV scores from the training partition. Lower
 | `aggregate_cpu_utilization` | Ridge | 0.224 | 0.255 |
 | `aggregate_cpu_utilization` | DampedETS | 0.244 | 0.275 |
 
-Ridge is selected for CPU because it has the lowest mean CV MAE and improves over the baseline by more than the required 3%. The difference is modest in absolute CPU percentage points, and the model is not uniformly best on the later holdout.
+All models have zero error for VM count because it does not change in training. For CPU, Ridge has the lowest average CV MAE and RMSE. It also passes the 3% improvement rule, so the selection rule chooses Ridge.
 
 ![Mean CPU CV MAE and RMSE for the three candidates.](figures/cv_cpu_scores.png)
 
 ### Final holdout check (run once)
 
-After selection, each chosen model was fit using the first 110 points and forecast the final 24 timestamps. The holdout actuals were used only to calculate this final check. No model, policy, or parameter was changed after reviewing these figures.
+After model selection, the selected models were fit on the first 110 points and used to forecast the final 24. Holdout actuals were used only to calculate these scores. No model, policy, or parameter was changed after seeing them.
 
 | Target | Selected model | Selected MAE | Selected RMSE | Baseline | Baseline MAE | Baseline RMSE |
 |---|---|---:|---:|---|---:|---:|
 | `active_vm_count` | Last12Mean | 0.0000 | 0.0000 | Last12Mean | 0.0000 | 0.0000 |
 | `aggregate_cpu_utilization` | Ridge | 0.3012 | 0.3604 | Last12Mean | 0.1230 | 0.1613 |
 
-On this one holdout, CPU Ridge is worse than Last12Mean. This contrasts with the training-only CV ranking and is an important limitation of the result, not a basis for post-hoc retuning. The complete 24 raw timestamps, point predictions, and interval bounds are recorded in `notes.md`.
+On this holdout, Last12Mean did better than Ridge for CPU. This differs from the CV result and is an important limitation; it is not a reason to change the model after seeing the holdout. The full forecast and interval table for all 24 raw timestamps is in `notes.md`.
 
-## 7. Error and failure analysis
+## 7. Forecast errors and where they occur
 
-The CPU peak threshold is the 90th percentile of the training series, 9.6684%. Across the overlapping CV forecasts, 27 cases are peaks and 141 are non-peaks. Peak MAE/RMSE are 0.4104/0.4611, compared with 0.1885/0.2279 for non-peaks. Mean signed error (`actual − forecast`) is +0.4104 for peaks and +0.1400 for non-peaks. Positive bias means the selected model tends to under-forecast, particularly during higher CPU observations.
+“Peak” means actual CPU above the 90th percentile of the training series: 9.6684%. The seven overlapping folds contain 168 cases: 27 peak cases and 141 non-peak cases.
 
-The worst CV folds by MAE are Fold 1 (0.4148), Fold 2 (0.3296), and Fold 3 (0.2523). In Fold 1, actual CPU rises into a sustained high period near 9.91%, while Ridge remains around 9.2–9.4%, consistent with under-response to the rise. In Fold 2, recursive Ridge drifts downward while actual CPU remains elevated, then actual CPU drops late in the window; the forecast misses both the level and transition. These observations describe likely explanations, not causal diagnoses.
+| Group | Cases | MAE | RMSE | Average error (actual − forecast) |
+|---|---:|---:|---:|---:|
+| Peak (`actual > 9.6684%`) | 27 | 0.4104 | 0.4611 | +0.4104 |
+| Non-peak | 141 | 0.1885 | 0.2279 | +0.1400 |
 
-**Operational implication:** If the forecast is used for capacity planning, peak error deserves more attention than the overall CV average. The positive bias and weaker early folds support including a safety margin and monitoring for changes in level; this evidence does not justify a separate peak model.
+Peak errors are more than twice as large as non-peak errors. The positive average error in both groups means Ridge tends to forecast too low, especially during peaks.
 
-The optional horizon-step analysis found MAE of 0.1092 at step 2 and 0.3798 at step 16, the lowest and highest values respectively. The pattern is irregular rather than steadily increasing with horizon, so a simple horizon-dependent error assumption is not supported by this short trace.
+The folds with the highest MAE are:
 
-## 8. Capacity-planning recommendation
+| Rank | Fold | MAE |
+|---:|---:|---:|
+| 1 | 1 | 0.4148 |
+| 2 | 2 | 0.3296 |
+| 3 | 3 | 0.2523 |
+| 4 | 6 | 0.1655 |
+| 5 | 5 | 0.1545 |
+| 6 | 7 | 0.1446 |
+| 7 | 4 | 0.1076 |
 
-The capacity comparison uses the selected Ridge model's CPU CV forecasts and the pooled 90th-percentile residual as the upper 80% interval margin (0.4984 percentage points). It evaluates exactly three policies: A, provision at the forecast; B, forecast plus half the margin; and C, forecast plus the full margin. Under-provisioning is the share of cases where actual exceeds provision. Average shortfall is computed only on under-provisioned cases; wasted headroom is computed only where provision meets or exceeds actual.
+In Fold 1, actual CPU rises to a sustained high near 9.91%, while Ridge stays around 9.2–9.4%. This suggests the forecast did not rise quickly enough. In Fold 2, Ridge gradually predicts lower values while actual CPU remains high, then actual CPU drops near the end. The forecast misses both changes. These are likely explanations, not proven causes.
+
+**Why it matters:** Errors are concentrated in high CPU periods and in early folds. If used for planning, the forecast needs a safety margin and monitoring for changes in demand. The evidence does not justify adding a separate peak model.
+
+The optional error-by-step analysis found the lowest MAE was **0.1092 at step 2** and the highest was **0.3798 at step 16**. Error does not rise steadily with each step, so this short series does not support a simple claim that later steps always have larger errors.
+
+## 8. Capacity recommendation
+
+The three capacity policies use CPU CV forecasts from Ridge. The extra margin is the 90th percentile of the pooled CV errors (actual minus forecast): **0.4984 percentage points**.
+
+- **Policy A:** provide exactly the forecast.
+- **Policy B:** provide the forecast plus half the margin.
+- **Policy C:** provide the forecast plus the full margin.
+
+“Under-provisioning” means actual CPU is higher than the capacity provided. Its rate is the share of all cases where that happens. Average shortfall is calculated only for those cases. “Wasted headroom” is the extra capacity on cases where the provision is enough.
 
 | Policy | Under-provisioning rate | Average shortfall | Wasted headroom |
 |---|---:|---:|---:|
@@ -110,16 +164,18 @@ The capacity comparison uses the selected Ridge model's CPU CV forecasts and the
 
 ![CV shortfall and headroom trade-off for the three provisioning policies.](figures/capacity_policy_tradeoff.png)
 
-**Recommendation:** Use Policy C when avoiding CPU shortfalls is the priority: it has the lowest CV under-provisioning rate and average shortfall. Its trade-off is the largest wasted headroom, so Policy B is a reasonable compromise if spare capacity is costly relative to the increased shortfall risk. On the one-time holdout, Policy C under-provisioned 6 of 24 points (25.00%); wasted headroom averaged 0.3151 percentage points on the 18 adequately provisioned points. This holdout result is reported for transparency and did not influence the recommendation or parameters.
+**Recommendation:** Choose Policy C when avoiding shortfalls matters most. It has the lowest CV under-provisioning rate (10.12%) and average shortfall (0.0868), but the most wasted headroom (0.3601 percentage points). Policy B is a middle option if spare capacity is expensive.
+
+On the one-time holdout, Policy C was below actual CPU at 6 of 24 points (25.00%). For the 18 points where it provided enough, average wasted headroom was 0.3151 percentage points. This holdout result is reported for transparency and did not change the policy choice.
 
 ## 9. Limitations and future work
 
-The study observes only about nine hours of training data. It cannot establish daily or weekly seasonality, and source-relative timestamps do not anchor workload to actual local clock time. The CV folds overlap, the trace has a single cohort, and some metadata segments have small populations. CV favors Ridge for CPU, but the one-time holdout favors the simple baseline; results should therefore be treated as evidence from this trace rather than a general performance guarantee. Exact normalized-MAE and sMAPE comparison values are not included in the documented focused three-candidate results, so none are reported here.
+The training data covers only about nine hours. It cannot show daily or weekly patterns, and the timestamps do not identify the real local time. The CV folds overlap, the data contains one observed VM group, and some metadata groups have few VMs. Ridge has the best CPU CV score, but Last12Mean did better on the one-time holdout. These results describe this trace and should not be treated as a general performance guarantee. Numeric normalized-MAE and sMAPE results are not available in the documented three-model comparison, so they are not reported here.
 
-The constant `active_vm_count` of 10,000 throughout training is a survivorship effect of the observed cohort. It means this sample provides no training variation with which to validate changing fleet size; broader conclusions about VM churn or a changing production fleet require data that represents arrivals, departures, and changing membership.
+The `active_vm_count` remains at 10,000 for the full training window. This is a survivorship effect in the observed group: these VMs are present throughout the sample. It does not show how a changing fleet would behave, so conclusions about fleet growth or churn require data that includes such changes.
 
-Next work should validate the same leakage-safe design on longer traces and additional forecast origins, investigate whether the cohort is representative of the operational fleet, and re-evaluate the safety-margin trade-off when more observations are available. Any extension should continue to keep holdout labels out of selection and tuning, and should compare against the existing baseline before adding complexity.
+Future work should use longer traces and more forecast periods, check whether this VM group represents the fleet where forecasts would be used, and reassess the safety margin with more data. Any further model selection should continue to use training-only time-ordered validation and must not use the final holdout to tune the model.
 
 ---
 
-All reported numerical findings in this report are taken from `notes.md`. Figures are visualizations of those documented values; no additional measurements or holdout analysis were introduced.
+All numbers in this report come from `notes.md`. The figures show those same documented values; no new measurements or holdout analysis were added.
