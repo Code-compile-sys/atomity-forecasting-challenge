@@ -1,4 +1,4 @@
-# Phase 2 — Training-only EDA notes
+#  Training-only EDA notes
 
 ## Scope and leakage control
 
