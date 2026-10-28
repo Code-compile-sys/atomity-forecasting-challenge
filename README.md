@@ -67,7 +67,7 @@ The dataset is distributed as a release asset and is intentionally not committed
 From the repository root, run:
 
 ```bash
-python -m cwfc.predict --data challenge_data --output predictions.csv
+python -m cwfc.predict --data challenge_data --output predictions/predictions.csv
 ```
 
 The default holdout is the final 24 timestamps. The generated CSV contains exactly `timestamp,active_vm_count,aggregate_cpu_utilization`, in chronological order, without an index. Predictions are validated for matching timestamps, finite values, non-negative VM counts, and CPU utilization in `[0,100]`. To use another horizon explicitly, pass `--holdout N`.
